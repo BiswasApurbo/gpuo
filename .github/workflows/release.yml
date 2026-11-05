@@ -1,0 +1,25 @@
+name: Release
+
+# Push a tag like v0.1.0 to build the package and publish a GitHub Release with the wheel.
+# Users then install with: pip install "gpuo[server] @ git+https://github.com/<owner>/gpuo@v0.1.0"
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]" && pytest -q
+      - run: pip install build && python -m build
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpuo</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1b; --quiet: #6b6b66; --line: #e4e3de;
+    --accent: #2f6fde; --good: #2e8b57; --warn: #c77d1a; --bad: #c4423a;
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151514; --panel: #1e1e1c; --ink: #ecebe6; --quiet: #9a9993; --line: #2f2f2c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-size: 14px; }
+  header { display: flex; align-items: baseline; gap: 16px; padding: 20px 24px 8px; }
+  header h1 { margin: 0; font-size: 20px; letter-spacing: -0.01em; }
+  header .meta { color: var(--quiet); font-size: 12px; }
+  main { padding: 8px 24px 40px; display: grid; gap: 20px; max-width: 1200px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--quiet); font-weight: 500; font-size: 12px; }
+  tr.click { cursor: pointer; } tr.click:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; border: 1px solid var(--line); }
+  .s-running { color: var(--accent); border-color: var(--accent); }
+  .s-completed { color: var(--good); border-color: var(--good); }
+  .s-failed, .s-lost { color: var(--bad); border-color: var(--bad); }
+  .s-waiting, .s-deadline, .s-queued { color: var(--warn); border-color: var(--warn); }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; width: 120px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+        max-height: 320px; overflow: auto; font-size: 12px; white-space: pre-wrap; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } main, header { padding-left: 16px; padding-right: 16px; } }
+  button { font: inherit; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--ink); cursor: pointer; }
+  .muted { color: var(--quiet); }
+  .scroll { overflow-x: auto; }
+  svg text { fill: var(--quiet); font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>gpuo</h1>
+  <span class="meta" id="meta"></span>
+</header>
+<main>
+  <section>
+    <h2>Your GPU targets</h2>
+    <div class="scroll"><table id="targets"></table></div>
+    <p class="muted" style="margin:8px 0 0;font-size:12px">Remaining hours are estimates from gpuo's own usage ledger. Correct them with <code>gpuo target sync NAME --remaining H</code>.</p>
+  </section>
+  <section>
+    <h2>Jobs</h2>
+    <div class="scroll"><table id="jobs"></table></div>
+  </section>
+  <section id="detail" hidden>
+    <h2 id="detail-title"></h2>
+    <div class="grid2">
+      <div><h2>Loss</h2><svg id="chart" viewBox="0 0 520 200" width="100%"></svg></div>
+      <div><h2>Segments</h2><div class="scroll"><table id="segments"></table></div></div>
+    </div>
+    <h2 style="margin-top:16px">Checkpoints</h2>
+    <div class="scroll"><table id="ckpts"></table></div>
+    <h2 style="margin-top:16px">Logs</h2>
+    <pre id="logs"></pre>
+    <button id="cancel">Cancel job</button>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let selected = null;
+const esc = (s) => String(s ?? "-").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const pill = (s) => `<span class="pill s-${esc(s)}">${esc(s)}</span>`;
+const ago = (t) => t ? `${Math.round((Date.now() / 1000 - t) / 60)} min ago` : "-";
+
+function table(el, cols, rows, onclick) {
+  el.innerHTML = `<tr>${cols.map(c => `<th>${c[0]}</th>`).join("")}</tr>` +
+    (rows.length ? rows.map((r, i) => `<tr class="${onclick ? "click" : ""}" data-i="${i}">${cols.map(c => `<td>${c[1](r)}</td>`).join("")}</tr>`).join("")
+                 : `<tr><td colspan="${cols.length}" class="muted">None yet</td></tr>`);
+  if (onclick) el.querySelectorAll("tr.click").forEach(tr => tr.onclick = () => onclick(rows[+tr.dataset.i]));
+}
+
+async function refresh() {
+  const o = await (await fetch("/api/overview")).json();
+  $("meta").textContent = `owner ${o.owner} · storage ${o.storage} · scheduler ${o.scheduler.t ? ago(o.scheduler.t) : "starting"}${o.scheduler.error ? " · error: " + o.scheduler.error : ""}`;
+  table($("targets"), [
+    ["Name", t => esc(t.name)], ["Kind", t => esc(t.kind)], ["GPU", t => esc(t.gpu)],
+    ["VRAM", t => `${t.vram_gb} GB`], ["Session cap", t => `${t.session_cap_h} h`],
+    ["Left this week", t => t.remaining_h == null ? "unlimited" :
+      `<div style="display:flex;gap:8px;align-items:center"><div class="bar"><i style="width:${Math.min(100, 100 * t.remaining_h / t.weekly_quota_h)}%"></i></div>${t.remaining_h} h</div>`],
+    ["Next segment", t => `${t.usable_h} h`], ["State", t => t.enabled ? (t.busy ? pill("running") : "idle") : "disabled"],
+  ], o.targets);
+  table($("jobs"), [
+    ["Job", j => esc(j.name)], ["ID", j => `<span class="muted">${esc(j.id)}</span>`],
+    ["Status", j => pill(j.status)], ["Est. GPU h", j => esc(j.est_gpu_hours)],
+    ["Updated", j => ago(j.updated_at)], ["Error", j => `<span class="muted">${esc((j.error || "").slice(0, 60))}</span>`],
+  ], o.jobs, (j) => { selected = j.id; refreshDetail(); });
+  if (selected) refreshDetail();
+}
+
+function chart(points) {
+  const svg = $("chart");
+  const pts = points.filter(p => typeof p.loss === "number");
+  if (pts.length < 2) { svg.innerHTML = `<text x="10" y="100">No loss values logged yet</text>`; return; }
+  const W = 520, H = 200, L = 44, B = 24, T = 10, R = 10;
+  const xs = pts.map(p => p.step), ys = pts.map(p => p.loss);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys) || 1;
+  const X = v => L + (v - x0) / ((x1 - x0) || 1) * (W - L - R);
+  const Y = v => T + (1 - (v - y0) / ((y1 - y0) || 1)) * (H - T - B);
+  const segs = [...new Set(pts.map(p => p.segment))];
+  const colors = ["#2f6fde", "#c77d1a", "#2e8b57", "#8a4fd1", "#c4423a"];
+  let out = `<line x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}" stroke="currentColor" opacity=".2"/>`;
+  out += `<text x="4" y="${T + 8}">${y1.toFixed(3)}</text><text x="4" y="${H - B}">${y0.toFixed(3)}</text>`;
+  out += `<text x="${L}" y="${H - 6}">step ${x0}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${x1}</text>`;
+  segs.forEach((s, i) => {
+    const sp = pts.filter(p => p.segment === s);
+    out += `<polyline fill="none" stroke="${colors[i % colors.length]}" stroke-width="1.5" points="${sp.map(p => `${X(p.step)},${Y(p.loss)}`).join(" ")}"/>`;
+  });
+  svg.innerHTML = out;
+}
+
+async function refreshDetail() {
+  const [v, m, l] = await Promise.all([
+    fetch(`/api/jobs/${selected}`).then(r => r.json()),
+    fetch(`/api/jobs/${selected}/metrics`).then(r => r.json()),
+    fetch(`/api/jobs/${selected}/logs`).then(r => r.json()),
+  ]);
+  $("detail").hidden = false;
+  $("detail-title").innerHTML = `${esc(v.job.name)} ${pill(v.job.status)}`;
+  table($("segments"), [
+    ["Segment", s => esc(s.id)], ["Target", s => esc(s.target_name)], ["Status", s => pill(s.status)],
+    ["Steps", s => `${s.start_step ?? 0} → ${s.end_step ?? (s.heartbeat?.global_step ?? "…")}`],
+    ["Reason", s => `<span class="muted">${esc((s.exit_reason || "").slice(0, 40))}</span>`],
+  ], v.segments);
+  table($("ckpts"), [
+    ["ID", c => esc(c.id)], ["Epoch", c => c.epoch], ["Step", c => c.global_step],
+    ["Size", c => `${(c.bytes / 1e6).toFixed(1)} MB`], ["Saved", c => ago(c.t)],
+  ], v.checkpoints);
+  chart(m);
+  $("logs").textContent = l.text || "No logs yet.";
+  $("cancel").onclick = async () => { await fetch(`/api/jobs/${selected}/cancel`, { method: "POST" }); refresh(); };
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
